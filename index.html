@@ -110,7 +110,7 @@ const api = (action, p) => fetch(API_URL, { method: 'POST', headers: { 'Content-
   body: JSON.stringify(Object.assign({ key: KEY, action: action }, p || {})) })
   .then(r => r.text()).then(t => {
     let j; try { j = JSON.parse(t); } catch (e) { throw new Error('API trả về trang web thay vì dữ liệu. Kiểm tra API_URL (phải là link /exec), quyền truy cập "Bất kỳ ai" và đã triển khai Phiên bản mới.'); }
-    if (!j.ok) throw new Error(j.error || 'Lỗi máy chủ'); return j; });
+    if (!j.ok) throw new Error(j.error || ('Lỗi máy chủ: ' + t.slice(0, 200))); return j; });
 const persist = () => { try { localStorage.setItem('q', JSON.stringify(queue)); } catch (e) {} };
 const ui = () => { $('cnt').textContent = 'Quét ' + scanned; $('pend').textContent = 'Chờ ' + (queue.length + jobs.length); };
 const showErr = m => { $('err').textContent = m || ''; $('err').style.display = m ? 'block' : 'none'; };
