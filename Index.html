@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root{--denim:#1d3557;--ink:#14213d;--amber:#ffb703;--ok:#2fbf71;--err:#e5383b}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:#000;color:#fff;font-family:'Be Vietnam Pro',system-ui,sans-serif;overflow:hidden}
+  #top{position:absolute;top:0;left:0;right:0;z-index:3;display:flex;gap:8px;padding:10px;background:rgba(20,33,61,.92);align-items:center}
+  #order{flex:1;min-width:0;font:inherit;font-size:15px;padding:10px;border-radius:10px;border:0}
+  .pill{background:var(--amber);color:var(--ink);font-weight:800;border-radius:20px;padding:6px 12px;font-size:14px;white-space:nowrap}
+  #pend{background:#fff}
+  #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  #guide{position:absolute;left:5%;right:5%;top:22%;height:36%;border:3px solid var(--amber);border-radius:14px;box-shadow:0 0 0 100vmax rgba(0,0,0,.35);pointer-events:none;transition:border-color .15s}
+  #guide.ok{border-color:var(--ok)}#guide.bad{border-color:var(--err)}
+  #bottom{position:absolute;left:0;right:0;bottom:0;z-index:3;padding:12px 12px calc(12px + env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(0,0,0,.85) 35%);display:grid;gap:10px}
+  #res{min-height:64px}
+  #size{font-size:34px;font-weight:800;line-height:1.1}
+  #txt{font-size:13px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #row{display:flex;gap:10px;align-items:center}
+  button{font:inherit;font-weight:800;border:0;border-radius:14px;padding:14px;cursor:pointer}
+  #shot{flex:1;background:var(--amber);color:var(--ink);font-size:20px;padding:18px}
+  #auto{background:#fff;color:var(--ink)}#auto.on{background:var(--ok);color:#fff}
+  #undo{background:rgba(255,255,255,.18);color:#fff}
+  button:focus-visible,#order:focus-visible{outline:3px solid #fff;outline-offset:2px}
+  #msg{position:absolute;inset:0;z-index:4;display:none;place-items:center;text-align:center;padding:24px;background:rgba(20,33,61,.95);font-size:17px}
+  #msg button{margin-top:14px;background:var(--amber);color:var(--ink)}
+</style>
+</head>
+<body>
+<div id="top"><select id="order"><option>Đang tải…</option></select><span class="pill" id="saved">Đã lưu 0</span><span class="pill" id="pend">Chờ 0</span></div>
+<video id="cam" playsinline muted></video>
+<div id="guide"></div>
+<div id="bottom">
+  <div id="res"><div id="size">Đưa tem vào khung</div><div id="txt"></div></div>
+  <div id="row"><button id="auto" class="on">Tự quét: Bật</button><button id="shot">Quét</button><button id="undo">Hủy tem vừa quét</button></div>
+</div>
+<input id="file" type="file" accept="image/*" capture="environment" hidden>
+<div id="msg"><div><div id="msgt"></div><button id="msgb">Mở camera điện thoại</button></div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+const LANG = 'eng';          // đổi thành 'vie' nếu tem có chữ tiếng Việt có dấu (chậm hơn)
+const MIN_CONF = 55;         // độ tin cậy tối thiểu để tự lưu
+const LOW_CONF = 75;         // dưới mức này thì lưu kèm ảnh để kiểm tra lại
+const FLUSH_MS = 5000, FLUSH_N = 40, MAX_W = 900;
+const $ = id => document.getElementById(id);
+let worker, ready = false, busy = false, auto = true, armed = true, miss = 0, lastText = '';
+let queue = [], saved = 0, sending = false, stream = null, audio = null;
+try { queue = JSON.parse(localStorage.getItem('q') || '[]'); } catch (e) {}
+
+function persist(){ try { localStorage.setItem('q', JSON.stringify(queue)); } catch (e) {} }
+function ui(){ $('saved').textContent = 'Đã lưu ' + saved; $('pend').textContent = 'Chờ ' + queue.length; }
+function beep(ok){ try{ audio = audio || new (window.AudioContext||window.webkitAudioContext)(); const o = audio.createOscillator(), g = audio.createGain();
+  o.frequency.value = ok ? 880 : 220; g.gain.value = .15; o.connect(g); g.connect(audio.destination); o.start(); o.stop(audio.currentTime + (ok?.08:.25)); }catch(e){}
+  if (navigator.vibrate) navigator.vibrate(ok ? 40 : [80,60,80]); }
+function flash(c){ const g = $('guide'); g.className = c; setTimeout(() => g.className = '', 350); }
+
+// Danh sách đơn
+google.script.run.withSuccessHandler(list => {
+  const s = $('order'); s.innerHTML = '';
+  list.forEach((o,i) => { const p = document.createElement('option'); p.value = i; p.textContent = o.giao + ' · ' + o.don; p.dataset.g = o.giao; p.dataset.d = o.don; s.appendChild(p); });
+  try { const v = localStorage.getItem('ord'); if (v && s.querySelector('option[value="'+v+'"]')) s.value = v; } catch (e) {}
+}).withFailureHandler(e => { $('order').innerHTML = '<option>Lỗi tải danh sách</option>'; }).getOrders();
+$('order').onchange = () => { try { localStorage.setItem('ord', $('order').value); } catch (e) {} lastText = ''; armed = true; };
+
+// OCR: nạp 1 lần, giữ trong bộ nhớ
+(async () => {
+  $('size').textContent = 'Đang nạp bộ đọc chữ…';
+  worker = await Tesseract.createWorker(LANG, 1, { logger: () => {} });
+  await worker.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' });
+  ready = true; $('size').textContent = 'Đưa tem vào khung'; loop();
+})().catch(e => { $('size').textContent = 'Không nạp được bộ đọc chữ'; });
+
+// Camera mở sẵn, không cần chạm chọn
+async function startCam(){
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    $('cam').srcObject = stream; await $('cam').play();
+    try { await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {}
+  } catch (e) {
+    $('msgt').textContent = 'Không mở được camera trong trang này. Dùng camera điện thoại (1 lần chạm = 1 tem).';
+    $('msg').style.display = 'grid'; $('auto').style.display = 'none';
+  }
+}
+$('msgb').onclick = () => { $('msg').style.display = 'none'; $('file').click(); };
+$('shot').onclick = () => { if (stream) scan(true); else $('file').click(); };
+$('file').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  const im = new Image(); im.onload = () => scan(true, im); im.src = URL.createObjectURL(f); };
+
+function grab(src){
+  const v = src || $('cam'), W = v.videoWidth || v.naturalWidth, H = v.videoHeight || v.naturalHeight;
+  const crop = src ? { x: 0, y: 0, w: W, h: H } : { x: W*.05, y: H*.22, w: W*.9, h: H*.36 };  // khớp khung vàng
+  const k = Math.min(1, MAX_W / crop.w), c = document.createElement('canvas');
+  c.width = Math.round(crop.w*k); c.height = Math.round(crop.h*k);
+  const x = c.getContext('2d'); x.filter = 'grayscale(1) contrast(1.35)';
+  x.drawImage(v, crop.x, crop.y, crop.w, crop.h, 0, 0, c.width, c.height);
+  return c;
+}
+function parseSize(t){
+  const m = t.toUpperCase().replace(/\s+/g,' ').match(/\b(\d?X{1,3}[SL]|XS|S|M|L|\d{2,3}[A-Z]?)\s*[X×*\/]\s*(\d{1,3})\b/);
+  return m ? m[1] + ' x ' + m[2] : '';
+}
+
+async function scan(manual, src){
+  if (busy || !ready) return;
+  const op = $('order').selectedOptions[0];
+  if (!op || !op.dataset.d) { $('size').textContent = 'Chọn đơn hàng trước'; return; }
+  busy = true;
+  try {
+    const t0 = performance.now(), cv = grab(src);
+    const { data } = await worker.recognize(cv);
+    const text = data.text.replace(/\n{2,}/g,'\n').trim(), size = parseSize(text), conf = Math.round(data.confidence);
+    const good = !!size && conf >= MIN_CONF;
+    if (manual ? !text : !good) {
+      if (!manual) { if (++miss >= 3) armed = true; }
+      else { flash('bad'); beep(false); $('size').textContent = 'Không đọc được, quét lại'; }
+      return;
+    }
+    miss = 0;
+    if (!manual && !armed && text === lastText) return;   // tem cũ vẫn đang trong khung
+    armed = false; lastText = text;
+    const item = { t: Date.now(), giao: op.dataset.g, don: op.dataset.d, text: text, size: size };
+    if (conf < LOW_CONF) item.image = cv.toDataURL('image/jpeg', .6).split(',')[1];
+    queue.push(item); persist(); ui(); flash('ok'); beep(true);
+    $('size').textContent = size || '(không có cỡ x giàng)';
+    $('txt').textContent = text.replace(/\n/g,' | ') + '  · ' + Math.round(performance.now()-t0) + ' ms';
+    if (queue.length >= FLUSH_N) flush();
+  } catch (e) { $('size').textContent = 'Lỗi đọc, quét lại'; }
+  finally { busy = false; }
+}
+async function loop(){ while (true) { if (auto && stream) await scan(false); await new Promise(r => setTimeout(r, 150)); } }
+
+$('auto').onclick = () => { auto = !auto; $('auto').classList.toggle('on', auto); $('auto').textContent = 'Tự quét: ' + (auto ? 'Bật' : 'Tắt'); armed = true; };
+$('undo').onclick = () => { if (queue.length) { queue.pop(); persist(); ui(); lastText = ''; armed = true; $('size').textContent = 'Đã hủy tem vừa quét'; $('txt').textContent = ''; } else { $('size').textContent = 'Tem đó đã được gửi, báo tổ trưởng'; } };
+
+// Gửi nền theo lô
+function flush(){
+  if (sending || !queue.length) return;
+  sending = true; const batch = queue.splice(0, 60); persist();
+  google.script.run.withSuccessHandler(() => { sending = false; saved += batch.length; ui(); })
+    .withFailureHandler(() => { sending = false; queue = batch.concat(queue); persist(); ui(); }).saveBatch(batch);
+}
+setInterval(flush, FLUSH_MS);
+window.addEventListener('beforeunload', e => { if (queue.length) { e.preventDefault(); e.returnValue = ''; } });
+ui(); startCam();
+</script>
+</body>
+</html>
