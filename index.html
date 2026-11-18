@@ -93,11 +93,11 @@
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script>
 // ===== CẤU HÌNH =====
-const API_URL = 'https://script.google.com/macros/s/AKfycbwrcck7sRMF6Oj_czawu1PxmhkOcJ9Z5hKL16faU9NJb_prilIha5w6gYJKTDhrgDSK/exec';
-const KEY = '123';   // phải giống KEY trong Code.gs
+const API_URL = 'https://script.google.com/macros/s/AKfycbzbv3uvgJ29ImqIPeVaUNXkQrMDTgmVChoJMz1jQ_Wj1bG7G23vimegQ3S3KAMvxGyh/exec';
+const KEY = '12345678';   // phải giống KEY trong Code.gs
 const MODE = 'hybrid';    // 'hybrid' | 'local' | 'server' (server = chỉ OCR Google)
 const LANG = 'vie';
-const MIN_CONF = 55, LOW_CONF = 75, FLUSH_MS = 4000, FLUSH_N = 40, MAX_W = 1920;
+const MIN_CONF = 55, LOW_CONF = 75, FLUSH_MS = 1500, FLUSH_N = 20, MAX_W = 1280, REFINE_BELOW = 88;
 const CROP = { x: 0, y: 0, w: 1, h: 1 };   // vùng chụp: toàn bộ khung hình camera (lớn hơn vùng thấy trên màn hình)
 // =====================
 const $ = id => document.getElementById(id), sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -110,7 +110,7 @@ const api = (action, p) => fetch(API_URL, { method: 'POST', headers: { 'Content-
   body: JSON.stringify(Object.assign({ key: KEY, action: action }, p || {})) })
   .then(r => r.text()).then(t => {
     let j; try { j = JSON.parse(t); } catch (e) { throw new Error('API trả về trang web thay vì dữ liệu. Kiểm tra API_URL (phải là link /exec), quyền truy cập "Bất kỳ ai" và đã triển khai Phiên bản mới.'); }
-    if (!j.ok) throw new Error(j.error || ('Lỗi máy chủ: ' + t.slice(0, 200))); return j; });
+    if (!j.ok) throw new Error(j.error || 'Lỗi máy chủ'); return j; });
 const persist = () => { try { localStorage.setItem('q', JSON.stringify(queue)); } catch (e) {} };
 const ui = () => { $('cnt').textContent = 'Quét ' + scanned; $('pend').textContent = 'Chờ ' + (queue.length + jobs.length); };
 const showErr = m => { $('err').textContent = m || ''; $('err').style.display = m ? 'block' : 'none'; };
@@ -248,7 +248,8 @@ function loadSum(){
 $('fSum').onclick = () => { if (!ready_()) { $('first').textContent = 'Chọn mùa SX, đơn hàng, giao hàng trước'; return; } $('sum').hidden = false; drawSum(); loadSum(); };
 $('sumClose').onclick = () => { $('sum').hidden = true; };
 $('sumRefresh').onclick = loadSum;
-setInterval(() => { if (!document.hidden) loadSum(); }, 30000);
+let st = 0; const sumSoon = () => { clearTimeout(st); st = setTimeout(() => { if (!sending && !queue.length) loadSum(); }, 2500); };
+setInterval(() => { if (!document.hidden && !$('sum').hidden) loadSum(); }, 15000);   // chỉ tự làm mới khi đang mở bảng
 
 // ===== 2) Camera mở ngay =====
 async function startCam(){
@@ -345,15 +346,15 @@ async function scan(job){
   const t0 = performance.now(), cv = job.cv;
   try {
     let text = '', conf = 0, via = 'máy', res = null;
-    if (localOK && MODE !== 'server') { res = await readLocal(cv); text = res.text; conf = res.conf; }
+    if (localOK && MODE !== 'server') { res = await readLocal(cv); text = res.text; conf = res.L ? Math.round(res.L.confidence) : res.conf; }   // conf = độ tin cậy của dòng đầu
     let first = text.split('\n')[0] || '';
     let good = first.length >= 3 && conf >= MIN_CONF;
-    if (MODE !== 'local' && conf < LOW_CONF) {
+    if (!good && MODE !== 'local') {   // chỉ gọi OCR Google (chậm) khi máy đọc không ra
       $('first').textContent = 'Đang đọc chính xác…';
       try { text = await serverOcr(cv); conf = 100; via = 'Google'; res = null; } catch (e) { showErr('OCR Google lỗi: ' + e.message); }
       first = text.split('\n')[0] || ''; good = first.length >= 3;
     }
-    if (good && res) { await refineFirst(cv, res); text = res.text; first = text.split('\n')[0] || first; }
+    if (good && res && conf < REFINE_BELOW) { await refineFirst(cv, res); text = res.text; first = text.split('\n')[0] || first; }   // đọc lại kỹ dòng đầu chỉ khi cần
     if (!text) { flash('bad'); beep(false); $('first').textContent = 'Không đọc được, quét lại'; return false; }
     const now = Date.now();
     lastText = text; lastT = now;
@@ -362,14 +363,14 @@ async function scan(job){
     queue.push(item); persist(); scanned++; ui(); flash('ok'); beep(true); plus();
     $('first').textContent = first; $('txt').textContent = text.split('\n').slice(1).join('\n');
     $('meta').textContent = job.d + ' · ' + job.g + ' · ' + via + ' ' + Math.round(performance.now() - t0) + ' ms';
-    if (queue.length >= FLUSH_N) flush();
+    if (queue.length >= FLUSH_N) flush(); else flushSoon();
     return true;
   } catch (e) { $('first').textContent = 'Lỗi đọc, quét lại'; showErr(String(e.message || e)); return false; }
 }
 async function loop(){
   while (true) {
     if (jobs.length) { await scan(jobs.shift()); ui(); }
-    await sleep(100);
+    await sleep(jobs.length ? 0 : 40);
   }
 }
 $('undo').onclick = () => { if (queue.length) { queue.pop(); persist(); scanned = Math.max(0, scanned - 1); ui(); lastText = ''; $('first').textContent = 'Đã hủy tem vừa quét'; $('txt').textContent = ''; $('meta').textContent = ''; } else $('first').textContent = 'Tem đó đã gửi lên sheet'; };
@@ -378,9 +379,10 @@ $('undo').onclick = () => { if (queue.length) { queue.pop(); persist(); scanned 
 function flush(){
   if (sending || !queue.length) return;
   sending = true; const batch = queue.splice(0, 60); persist();
-  api('save', { items: batch }).then(() => { sending = false; ui(); showErr(''); loadSum(); })
+  api('save', { items: batch }).then(() => { sending = false; ui(); showErr(''); sumSoon(); if (queue.length) flush(); })
     .catch(e => { sending = false; queue = batch.concat(queue); persist(); ui(); showErr('Chưa ghi được vào Sheet: ' + e.message + ' (sẽ tự gửi lại)'); });
 }
+let ft = 0; const flushSoon = () => { clearTimeout(ft); ft = setTimeout(flush, 300); };
 setInterval(flush, FLUSH_MS);
 window.addEventListener('beforeunload', e => { if (queue.length) { e.preventDefault(); e.returnValue = ''; } });
 if (API_URL.indexOf('http') !== 0) showErr('Chưa dán link /exec của Apps Script vào API_URL trong Index.html');
