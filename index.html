@@ -146,6 +146,7 @@ function loadOrders(fresh, first){
     if (validSel(want)) cur = { mua: want.mua, don: want.don, giao: want.giao };
     else if (cur.don || cur.giao) { cur = { mua: '', don: '', giao: '' }; saveCur(); }
     updateFields(); sumData = null; loadSum();
+    if (!orders.length) showErr('KH_CAT_SIZE không có dòng nào có đủ Đơn hàng và Giao hàng. Kiểm tra tên sheet, tiêu đề cột và dữ liệu.');
     let nd = 0; byMua.forEach(m => nd += m.size);
     $('meta').textContent = 'Đã cập nhật ' + byMua.size + ' mùa · ' + nd + ' đơn · ' + orders.length + ' đợt giao';
     if (!cur.don) $('first').textContent = 'Chọn mùa SX, đơn hàng, giao hàng';
