@@ -47,7 +47,6 @@
   button{font:inherit;font-weight:800;border:0;border-radius:14px;padding:14px;cursor:pointer}
   #shot{flex:1;background:var(--amber);color:var(--ink);font-size:20px;padding:18px}
   #undo{background:rgba(255,255,255,.18);color:#fff}
-  #force{background:#fff;color:var(--err)}
   button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #fff;outline-offset:2px}
 </style>
 </head>
@@ -64,7 +63,7 @@
 <div id="plus" aria-hidden="true">+1</div>
 <div id="bottom">
   <div><div id="first">Đang khởi động…</div><div id="txt"></div><div id="meta"></div></div>
-  <div id="row"><button id="shot">QUÉT</button><button id="force" hidden>Vẫn lưu</button><button id="undo">Hủy</button></div>
+  <div id="row"><button id="shot">QUÉT</button><button id="undo">Hủy</button></div>
 </div>
 <div id="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="sTitle">
   <div id="sHead"><button id="sBack" aria-label="Quay lại chọn đơn hàng">←</button><div id="sTitle">Chọn đơn hàng</div><button id="sClose" aria-label="Đóng">✕</button></div>
@@ -77,7 +76,7 @@
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script>
 // ===== CẤU HÌNH =====
-const API_URL = 'https://script.google.com/macros/s/AKfycbzt8kP7BJi_Ofz3bKb6cBO8mpd7SeGi0FvR52eLuoohP3e2hghH1Vvb8nR0D7p92SJv/exec';
+const API_URL = 'https://script.google.com/macros/s/AKfycbwwSvlcqDGoq1mTqF8LnNx90Gbb_iz6d44a2_iC78W6lSgaZNrnTt5vr5I43808zA1i/exec';
 const KEY = '12345678';   // phải giống KEY trong Code.gs
 const MODE = 'hybrid';             // 'hybrid' | 'local' | 'server' (server = chỉ dùng OCR Google)
 const LANG = 'vie';
@@ -250,58 +249,32 @@ async function readLocal(cv){
 }
 const serverOcr = cv => api('ocr', { image: cv.toDataURL('image/jpeg', .85).split(',')[1] }).then(j => tidy(j.text));
 
-// ===== 4) Kiểm tra size tem (cảnh báo nếu chưa đọc đúng) =====
-// Bảng chuẩn: số size -> chiều cao/vòng ngực (chỉ dùng cho tem thường, không có SHORT/PLUS)
-const STD = {'2':'160/64','4':'160/66','6':'160/70','8':'165/72','10':'165/74','12':'165/78',
-  '14':'165/84','16':'170/88','18':'170/94','20':'170/100','22':'165/110','24':'165/116'};
-const ANCHOR = /VIET|RN\s*\d|5402|1789/i, STRONG = /VIET|RN\s*\d|5402/i;
-const TAG = /\b(SHORT|COURT|CORTO|PENDEK|PLUS|TAILLE\s*FORTE|EXTRA)\b/i;
+// ===== 4) Kiểm tra cỡ tem (cảnh báo, KHÔNG nhận tem nếu dòng đầu không hợp lệ) =====
+// Quy tắc: dòng đầu của tem phải BẮT ĐẦU bằng 1 hoặc 2 chữ số (hoặc đúng "000").
+// Chỉ lấy phần số đầu dòng, bỏ qua mọi ký tự phía sau (x, /, ...). VD: "26x2" -> 26, "26/2" -> 26.
+// Không hợp lệ: bắt đầu bằng chữ, ký tự lạ, hoặc số có 3 chữ số trở lên (trừ 000).
 function parseSize(text){
-  const L = String(text).split('\n').map(l => l.trim()).filter(Boolean);
-  const top = L.slice(0, 10), hasAnchor = top.some(l => ANCHOR.test(l));
-  let end = L.findIndex((l, i) => i >= 1 && STRONG.test(l)); if (end < 0 || end > 6) end = 6;
-  const head = L.slice(0, end), nums = []; let waist = '';
-  head.forEach(l => {
-    let m = /^\W{0,2}(\d{1,2})(?=\s|$)(?!\s*\/)(?!\s*cm)/i.exec(l); if (m) nums.push(m[1]);
-    m = /^\W{0,2}(\d{2})\s*\/\s*(\d{1,2})(?=\s|$)/.exec(l); if (m && !waist) waist = m[1] + '/' + m[2];
-  });
-  let code = '', ratio = '';
-  for (const l of top) {
-    const m = /(\d{3})\s*\/\s*(1\d\d|\d{2})\s*([ACG4])?/.exec(l);
-    if (m) { ratio = m[1] + '/' + m[2]; code = ratio + (m[3] ? (m[3] === '4' ? 'A' : m[3]) : ''); break; }
-  }
-  const tag = ((TAG.exec(head.join(' ')) || [''])[0]).toUpperCase().replace(/\s+/g, ' ');
-  const freq = {}; nums.forEach(n => freq[n] = (freq[n] || 0) + 1);
-  let n = Object.keys(freq).sort((a, b) => freq[b] - freq[a])[0] || '';
-  let mismatch = Object.keys(freq).length > 1 && freq[n] * 2 <= nums.length;
-  if (!n && !waist && ratio) { n = Object.keys(STD).find(k => STD[k] === ratio) || ''; }
-  if (n && !tag && !waist && ratio && STD[n] && STD[n] !== ratio) mismatch = true;
-  const ok = !!code || ((n || waist) && (tag || waist || hasAnchor));
-  if (!ok) return null;
-  return { n: n || waist, key: [waist || n, tag, code].filter(Boolean).join(' '), mismatch: mismatch };
+  const first = String(text).split('\n').map(l => l.trim()).filter(Boolean)[0] || '';
+  const m = /^(\d+)/.exec(first);
+  const d = m ? m[1] : '';
+  const ok = d.length >= 1 && (d.length <= 2 || d === '000');
+  return { first: first, n: ok ? d : '' };
 }
-let lastFail = null;
+let warned = false;
 function hideWarn(){
-  $('first').classList.remove('warn'); $('bottom').classList.remove('warn'); $('force').hidden = true;
+  warned = false;
+  $('first').classList.remove('warn'); $('bottom').classList.remove('warn');
   if ($('err').dataset.w) { showErr(''); delete $('err').dataset.w; }
 }
-function fail(job, cv, text, sz){
-  flash('bad'); alarm();
-  const msg = sz && sz.mismatch ? '⚠ SIZE LỆCH – QUÉT LẠI' : '⚠ CHƯA ĐỌC ĐƯỢC SIZE – QUÉT LẠI';
+function fail(text, sz){
+  flash('bad'); alarm(); warned = true;
+  const msg = sz.first ? '⚠ TEM KHÔNG HỢP LỆ – QUÉT LẠI' : '⚠ CHƯA ĐỌC ĐƯỢC TEM – QUÉT LẠI';
   $('first').textContent = msg; $('first').classList.add('warn'); $('bottom').classList.add('warn');
-  $('txt').textContent = text || ''; $('meta').textContent = 'Tem này CHƯA được lưu';
+  $('txt').textContent = text || '';
+  $('meta').textContent = (sz.first ? 'Dòng đầu đọc được: "' + sz.first + '" · ' : '') + 'Tem này CHƯA được lưu';
   showErr(msg); $('err').dataset.w = '1';
-  lastFail = { t: Date.now(), giao: job.g, don: job.d, text: text || '', size: '', canhbao: 1,
-               image: cv.toDataURL('image/jpeg', .6).split(',')[1] };
-  $('force').hidden = !text;
   return false;
 }
-$('force').onclick = () => {
-  if (!lastFail) return;
-  queue.push(lastFail); lastFail = null; persist(); scanned++; ui();
-  hideWarn(); $('first').textContent = 'Đã lưu (chưa kiểm tra size)';
-  if (queue.length >= FLUSH_N) flush();
-};
 
 // ===== 5) Quét tay (bấm QUÉT hoặc chạm vào camera) =====
 function tap(){
@@ -319,11 +292,11 @@ $('file').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if
 async function scan(job){
   const t0 = performance.now(), cv = job.cv;
   try {
-    let text = '', conf = 0, via = 'máy', res = null;
-    if (localOK && MODE !== 'server') { res = await readLocal(cv); text = res.text; conf = res.conf; }
+    let text = '', conf = 0, via = 'máy';
+    if (localOK && MODE !== 'server') { const res = await readLocal(cv); text = res.text; conf = res.conf; }
     let sz = parseSize(text);
-    const bad = s => !s || s.mismatch;
-    // Chuyển sang OCR Google khi độ tin cậy thấp HOẶC chưa thấy size hợp lệ
+    const bad = s => !s || !s.n;
+    // Chuyển sang OCR Google khi độ tin cậy thấp HOẶC dòng đầu chưa hợp lệ
     if (MODE !== 'local' && (conf < LOW_CONF || bad(sz))) {
       $('first').textContent = 'Đang đọc chính xác…';
       const prev = { text: text, conf: conf, sz: sz };
@@ -332,12 +305,12 @@ async function scan(job){
         if (bad(sz) && !bad(prev.sz)) { text = prev.text; conf = prev.conf; sz = prev.sz; via = 'máy'; }
       } catch (e) { showErr('OCR Google lỗi: ' + e.message); }
     }
-    if (bad(sz)) return fail(job, cv, text, sz);
-    lastFail = null; hideWarn();
-    const item = { t: Date.now(), giao: job.g, don: job.d, text: text, size: sz.key };
+    if (bad(sz)) return fail(text, sz);
+    hideWarn();
+    const item = { t: Date.now(), giao: job.g, don: job.d, text: text, size: sz.n };
     if (conf < LOW_CONF) item.image = cv.toDataURL('image/jpeg', .6).split(',')[1];
     queue.push(item); persist(); scanned++; ui(); flash('ok'); beep(true); plus();
-    $('first').textContent = sz.key; $('txt').textContent = text;
+    $('first').textContent = 'Cỡ ' + sz.n; $('txt').textContent = text;
     $('meta').textContent = job.d + ' · ' + job.g + ' · ' + via + ' ' + Math.round(performance.now() - t0) + ' ms';
     if (queue.length >= FLUSH_N) flush();
     return true;
@@ -352,7 +325,7 @@ async function loop(){
   }
 }
 $('undo').onclick = () => {
-  if (lastFail) { lastFail = null; hideWarn(); $('first').textContent = 'Đã bỏ tem lỗi, quét lại'; $('txt').textContent = ''; $('meta').textContent = ''; return; }
+  if (warned) { hideWarn(); $('first').textContent = 'Đã bỏ cảnh báo, quét lại'; $('txt').textContent = ''; $('meta').textContent = ''; return; }
   if (queue.length) { queue.pop(); persist(); scanned = Math.max(0, scanned - 1); ui(); $('first').textContent = 'Đã hủy tem vừa quét'; $('txt').textContent = ''; $('meta').textContent = ''; }
   else $('first').textContent = 'Tem đó đã gửi lên sheet';
 };
